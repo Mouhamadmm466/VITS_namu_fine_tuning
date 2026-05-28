@@ -1,0 +1,9 @@
+# One override per line.
+# Format:
+# source phrase|replacement phrase
+#
+# Keep replacement text inside the MMS Hausa vocabulary:
+# d _ ɗ s g t o y r a u ā i ū c n j b ɓ l - 6 e k f ă ' w h z m ƙ ˈ and space
+#
+# Example:
+# kalma|kalˈma
