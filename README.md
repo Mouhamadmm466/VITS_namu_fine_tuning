@@ -65,6 +65,17 @@ wget -O /content/mms_hau_full/config.json https://huggingface.co/facebook/mms-tt
 wget -O /content/mms_hau_full/vocab.txt https://huggingface.co/facebook/mms-tts/resolve/main/full_models/hau/vocab.txt
 ```
 
+If the `monotonic_align` build fails with an error like `could not create 'monotonic_align/core...so': No such file or directory`, create the nested target package before running the build:
+
+```bash
+mkdir -p /content/vits/monotonic_align/monotonic_align
+touch /content/vits/monotonic_align/monotonic_align/__init__.py
+cd /content/vits/monotonic_align
+python setup.py build_ext --inplace
+```
+
+That error is usually a path/layout issue in the upstream VITS `monotonic_align` package, not a missing compiler by itself.
+
 ## Fine-tuning in Colab
 
 Assuming this repo is available at `/content/Namu_tts`:
