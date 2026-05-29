@@ -339,7 +339,11 @@ def main() -> None:
         last_epoch=start_epoch - 1,
     )
 
-    scaler = torch.amp.GradScaler(device_type="cuda", enabled=bool(config["train"]["fp16_run"]) and device.type == "cuda")
+    _fp16 = bool(config["train"]["fp16_run"]) and device.type == "cuda"
+    try:
+        scaler = torch.amp.GradScaler(device_type="cuda", enabled=_fp16)
+    except (TypeError, AttributeError):
+        scaler = torch.cuda.amp.GradScaler(enabled=_fp16)
     writer = SummaryWriter(log_dir=str(output_dir))
     writer_eval = SummaryWriter(log_dir=str(output_dir / "eval_tb"))
 
