@@ -130,7 +130,7 @@ def build_finetune_config(
     log_interval: int = 10,
     eval_interval: int = 100,
     save_interval: int = 100,
-    num_workers: int = 2,
+    num_workers: int = 0,
     seed: int = 1234,
 ) -> dict:
     config = json.loads(Path(base_config_path).read_text(encoding="utf-8"))

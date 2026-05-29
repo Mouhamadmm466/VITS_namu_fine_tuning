@@ -262,7 +262,7 @@ def main() -> None:
         train_dataset,
         batch_size=int(config["train"]["batch_size"]),
         shuffle=True,
-        num_workers=int(config["train"].get("num_workers", 2)),
+        num_workers=int(config["train"].get("num_workers", 0)),
         pin_memory=torch.cuda.is_available(),
         collate_fn=collate,
         drop_last=len(train_dataset) > int(config["train"]["batch_size"]),
