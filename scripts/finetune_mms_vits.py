@@ -31,7 +31,33 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", default=None, help="Override train.output_dir from the config.")
     parser.add_argument("--seed", type=int, default=None, help="Override the config seed.")
+    parser.add_argument(
+        "--trainable-modules",
+        default="dec,dp",
+        help=(
+            "Comma-separated list of generator module name prefixes to train. "
+            "All other parameters are frozen. "
+            "Use 'dec' for decoder-only (voice timbre), 'dec,dp' to also adapt the duration predictor. "
+            "Pass 'all' to fine-tune the entire generator (only safe with large datasets)."
+        ),
+    )
     return parser.parse_args()
+
+
+def freeze_generator(net_g, trainable_prefixes: list[str]) -> int:
+    if "all" in trainable_prefixes:
+        return sum(p.numel() for p in net_g.parameters())
+    frozen = 0
+    trainable = 0
+    for name, param in net_g.named_parameters():
+        if any(name.startswith(prefix) for prefix in trainable_prefixes):
+            param.requires_grad = True
+            trainable += param.numel()
+        else:
+            param.requires_grad = False
+            frozen += param.numel()
+    print(f"Frozen {frozen:,} parameters. Training {trainable:,} parameters ({trainable_prefixes}).")
+    return trainable
 
 
 def set_seed(seed: int) -> None:
@@ -264,8 +290,25 @@ def main() -> None:
     ).to(device)
     net_d = models.MultiPeriodDiscriminator(bool(config["model"]["use_spectral_norm"])).to(device)
 
+    pretrained_dir = Path(args.pretrained_dir).resolve()
+    resume_g = latest_checkpoint(output_dir, "G")
+    resume_d = latest_checkpoint(output_dir, "D")
+    global_step = 0
+
+    if resume_g and resume_d:
+        utils.load_checkpoint(str(resume_g), net_g, None)
+        utils.load_checkpoint(str(resume_d), net_d, None)
+        global_step = int("".join(filter(str.isdigit, resume_g.stem)) or 0)
+        print(f"Resuming from step {global_step}.")
+    else:
+        utils.load_checkpoint(str(pretrained_dir / "G_100000.pth"), net_g, None)
+        utils.load_checkpoint(str(pretrained_dir / "D_100000.pth"), net_d, None)
+
+    trainable_prefixes = [p.strip() for p in args.trainable_modules.split(",")]
+    freeze_generator(net_g, trainable_prefixes)
+
     optim_g = torch.optim.AdamW(
-        net_g.parameters(),
+        filter(lambda p: p.requires_grad, net_g.parameters()),
         lr=float(config["train"]["learning_rate"]),
         betas=tuple(config["train"]["betas"]),
         eps=float(config["train"]["eps"]),
@@ -277,32 +320,26 @@ def main() -> None:
         eps=float(config["train"]["eps"]),
     )
 
-    pretrained_dir = Path(args.pretrained_dir).resolve()
-    resume_g = latest_checkpoint(output_dir, "G")
-    resume_d = latest_checkpoint(output_dir, "D")
-    global_step = 0
-    start_epoch = 1
-
     if resume_g and resume_d:
         utils.load_checkpoint(str(resume_g), net_g, optim_g)
-        _, _, _, start_epoch = utils.load_checkpoint(str(resume_d), net_d, optim_d)
-        global_step = int("".join(filter(str.isdigit, resume_g.stem)) or 0)
-    else:
-        utils.load_checkpoint(str(pretrained_dir / "G_100000.pth"), net_g, None)
-        utils.load_checkpoint(str(pretrained_dir / "D_100000.pth"), net_d, None)
+        utils.load_checkpoint(str(resume_d), net_d, optim_d)
 
+    steps_per_epoch = max(1, len(train_dataset) // int(config["train"]["batch_size"]))
+    start_epoch = global_step // steps_per_epoch
+    # ExponentialLR.step() is called once per epoch; last_epoch=-1 means "not yet stepped",
+    # so we pass (start_epoch - 1) to restore the correct LR state when resuming.
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(
         optim_g,
         gamma=float(config["train"]["lr_decay"]),
-        last_epoch=start_epoch - 2,
+        last_epoch=start_epoch - 1,
     )
     scheduler_d = torch.optim.lr_scheduler.ExponentialLR(
         optim_d,
         gamma=float(config["train"]["lr_decay"]),
-        last_epoch=start_epoch - 2,
+        last_epoch=start_epoch - 1,
     )
 
-    scaler = torch.cuda.amp.GradScaler(enabled=bool(config["train"]["fp16_run"]) and device.type == "cuda")
+    scaler = torch.amp.GradScaler(device_type="cuda", enabled=bool(config["train"]["fp16_run"]) and device.type == "cuda")
     writer = SummaryWriter(log_dir=str(output_dir))
     writer_eval = SummaryWriter(log_dir=str(output_dir / "eval_tb"))
 
@@ -328,7 +365,7 @@ def main() -> None:
             waves = waves.to(device, non_blocking=True)
             wave_lengths = wave_lengths.to(device, non_blocking=True)
 
-            with torch.cuda.amp.autocast(enabled=scaler.is_enabled()):
+            with torch.amp.autocast(device_type="cuda", enabled=scaler.is_enabled()):
                 generated, loss_length, attn, ids_slice, x_mask, z_mask, latent_pack = net_g(
                     texts,
                     text_lengths,
@@ -367,7 +404,7 @@ def main() -> None:
                 )
 
                 real_outputs, fake_outputs, _, _ = net_d(wave_slice, generated.detach())
-                with torch.cuda.amp.autocast(enabled=False):
+                with torch.amp.autocast(device_type="cuda", enabled=False):
                     loss_disc, losses_disc_real, losses_disc_fake = losses.discriminator_loss(real_outputs, fake_outputs)
 
             optim_d.zero_grad(set_to_none=True)
@@ -376,9 +413,9 @@ def main() -> None:
             grad_norm_d = commons.clip_grad_value_(net_d.parameters(), None)
             scaler.step(optim_d)
 
-            with torch.cuda.amp.autocast(enabled=scaler.is_enabled()):
+            with torch.amp.autocast(device_type="cuda", enabled=scaler.is_enabled()):
                 real_outputs, fake_outputs, fmap_real, fmap_fake = net_d(wave_slice, generated)
-                with torch.cuda.amp.autocast(enabled=False):
+                with torch.amp.autocast(device_type="cuda", enabled=False):
                     loss_duration = torch.sum(loss_length.float())
                     loss_mel = F.l1_loss(mel_slice, mel_generated) * float(config["train"]["c_mel"])
                     loss_kl = losses.kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * float(config["train"]["c_kl"])

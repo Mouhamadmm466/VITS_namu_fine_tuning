@@ -50,8 +50,9 @@ def load_rows(metadata_csv: Path) -> list[dict[str, str]]:
     required = {"audio_path", "transcription"}
     if not rows:
         raise ValueError(f"No rows were found in {metadata_csv}")
-    if set(rows[0]) != required:
-        raise ValueError(f"{metadata_csv} must contain exactly these columns: {sorted(required)}")
+    missing = required - set(rows[0])
+    if missing:
+        raise ValueError(f"{metadata_csv} is missing required columns: {sorted(missing)}. Found: {sorted(rows[0])}")
     return rows
 
 
